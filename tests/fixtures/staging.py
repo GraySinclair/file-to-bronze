@@ -5,7 +5,7 @@ from importlib.resources import files
 from notebookutils import fs
 
 
-_FIXTURE_PACKAGE = "tests.fixtures.data"
+_FIXTURE_PACKAGE = f"{__package__}.data"
 
 
 def _resource_text(fixture: str) -> str:
