@@ -2,19 +2,6 @@
 
 `file-to-bronze` is a small PySpark package for loading landed files into Bronze Delta tables in Microsoft Fabric.
 
-## Package structure
-
-```text
-file-to-bronze/
-├── pyproject.toml
-├── README.md
-└── src/
-    └── file_to_bronze/
-        ├── __init__.py
-        ├── bronze_load_config.py
-        └── bronze_loader.py
-```
-
 The package exposes the classes:
 
 - BronzeLoadConfig
