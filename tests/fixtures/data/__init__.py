@@ -1,1 +1,0 @@
-"""Packaged Fabric test data."""
