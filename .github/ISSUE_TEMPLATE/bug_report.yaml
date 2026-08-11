@@ -1,0 +1,99 @@
+name: Bug report
+description: Report unexpected or incorrect behavior
+title: "[Bug]: "
+labels:
+  - bug
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug.
+
+        Do not include passwords, access tokens, connection strings,
+        customer data, or other sensitive information.
+
+  - type: checkboxes
+    id: existing-issue
+    attributes:
+      label: Existing issue
+      description: Check existing issues before submitting a duplicate.
+      options:
+        - label: I searched the existing issues and did not find this bug.
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: Clearly describe what went wrong.
+      placeholder: Describe the problem and when it occurs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable sequence that reproduces the problem.
+      placeholder: |
+        1. Run ...
+        2. Configure ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: Describe what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual behavior
+      description: Describe what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: error-output
+    attributes:
+      label: Error output or logs
+      description: Paste the relevant exception or log output.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Project version or commit
+      description: Enter the release version, branch, or commit hash.
+      placeholder: v1.2.0, main, or abc1234
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: Python 3.11
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Execution environment
+      options:
+        - Microsoft Fabric notebook
+        - Local development environment
+        - GitHub Actions
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add screenshots, sample inputs, or other relevant information.

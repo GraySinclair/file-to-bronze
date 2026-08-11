@@ -1,0 +1,93 @@
+# Name shown in the GitHub Actions UI.
+name: Draft GitHub release
+
+# Defines what event triggers this workflow.
+on:
+  # Allows you to run this workflow manually from the Actions tab.
+  workflow_dispatch:
+
+# Grants the workflow permission to write repository contents.
+# This is needed because the workflow creates and pushes a new git tag,
+# and also creates a GitHub Release tied to that tag.
+permissions:
+  contents: write
+
+jobs:
+  # Internal job id. This can be any descriptive identifier.
+  patch-release:
+    # Run this job on GitHub-hosted Ubuntu.
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check out the repository code onto the runner.
+      - uses: actions/checkout@v6
+        with:
+          # Fetch full git history and tags.
+          # This is important because the workflow needs to inspect existing tags
+          # like v1.0.3 in order to compute the next patch version.
+          fetch-depth: 0
+
+      # Determine what the next patch tag should be.
+      - name: Compute next patch version
+        # Gives this step an id so later steps can reference its outputs as:
+        # steps.version.outputs.next_tag
+        id: version
+
+        # Run this step using bash.
+        shell: bash
+
+        run: |
+          # Find the latest tag matching v* and sort by version descending.
+          # Example result: v1.0.3
+          latest_tag=$(git tag --list 'v*' --sort=-version:refname | head -n 1)
+
+          # If no matching tag exists yet, start at v0.1.0
+          if [ -z "$latest_tag" ]; then
+            next_tag="v0.1.0"
+          else
+            # Remove the leading "v"
+            # Example: v1.0.3 -> 1.0.3
+            version="${latest_tag#v}"
+
+            # Split the version string on dots into major, minor, patch
+            # Example: 1.0.3 -> major=1, minor=0, patch=3
+            IFS='.' read -r major minor patch <<< "$version"
+
+            # Increment the patch number by 1
+            # Example: 3 -> 4
+            next_patch=$((patch + 1))
+
+            # Reassemble the new version with the leading "v"
+            # Example: v1.0.4
+            next_tag="v${major}.${minor}.${next_patch}"
+          fi
+
+          # Expose the latest tag as a step output so later steps can use it.
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+
+          # Expose the computed next tag as a step output.
+          echo "next_tag=$next_tag" >> "$GITHUB_OUTPUT"
+
+      # Create the new git tag locally and push it to GitHub.
+      - name: Create and push tag
+        run: |
+          # Create a tag such as v1.0.4
+          git tag "${{ steps.version.outputs.next_tag }}"
+
+          # Push that tag to the origin remote
+          git push origin "${{ steps.version.outputs.next_tag }}"
+
+      # Create a GitHub Release for the new tag.
+      - name: Create GitHub release
+        env:
+          # Provide the GitHub CLI with an auth token.
+          # github.token is automatically provided by GitHub Actions.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Create a release for the new tag.
+          # --title sets the release title equal to the tag name.
+          # --generate-notes tells GitHub to auto-generate release notes.
+          gh release create "${{ steps.version.outputs.next_tag }}" \
+            --title "${{ steps.version.outputs.next_tag }}" \
+            --generate-notes \
+            --draft
