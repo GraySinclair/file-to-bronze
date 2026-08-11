@@ -1,0 +1,31 @@
+[project]
+name = "file-to-bronze"
+dynamic = ["version"]
+description = "Micro-package to facilitate files-to-bronze table in a structured manner."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Gray Sinclair" }
+]
+dependencies = []
+
+[build-system]
+requires = [
+    "hatchling",
+    "hatch-vcs",
+]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
