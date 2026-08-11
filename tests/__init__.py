@@ -1,1 +1,1 @@
-"""Test package for file_to_bronze."""
+"""Tests for file_to_bronze."""

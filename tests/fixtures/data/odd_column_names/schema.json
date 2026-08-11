@@ -1,0 +1,35 @@
+{
+  "type": "struct",
+  "fields": [
+    {
+      "name": "Customer (ID)",
+      "type": "long",
+      "nullable": true,
+      "metadata": {}
+    },
+    {
+      "name": "Customer Name",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+    },
+    {
+      "name": "Region/Area",
+      "type": "string",
+      "nullable": true,
+      "metadata": {}
+    },
+    {
+      "name": "Account Balance ($)",
+      "type": "double",
+      "nullable": true,
+      "metadata": {}
+    },
+    {
+      "name": "Updated At (UTC)",
+      "type": "timestamp",
+      "nullable": true,
+      "metadata": {}
+    }
+  ]
+}

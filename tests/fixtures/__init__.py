@@ -1,5 +1,8 @@
-"""Reusable test fixtures and staging helpers."""
+"""Reusable Fabric test fixtures."""
 
-from .staging import stage_fixture
+from .staging import stage_fixture, stage_schema_fixture
 
-__all__ = ["stage_fixture"]
+__all__ = [
+    "stage_fixture",
+    "stage_schema_fixture",
+]

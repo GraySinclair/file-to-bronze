@@ -1,4 +1,4 @@
-"""Helpers for staging packaged test fixtures into a Fabric Lakehouse."""
+"""Helpers for staging packaged fixtures into a Fabric Lakehouse."""
 
 from importlib.resources import files
 
@@ -6,6 +6,15 @@ from notebookutils import fs
 
 
 _FIXTURE_PACKAGE = "tests.fixtures.data"
+
+
+def _resource_text(fixture: str) -> str:
+    resource = files(_FIXTURE_PACKAGE).joinpath(fixture)
+
+    if not resource.is_file():
+        raise FileNotFoundError(f"Fixture not found: {fixture}")
+
+    return resource.read_text(encoding="utf-8")
 
 
 def stage_fixture(
@@ -16,43 +25,7 @@ def stage_fixture(
     file_name: str | None = None,
     overwrite: bool = True,
 ) -> str:
-    """
-    Copy a packaged fixture into the default Fabric Lakehouse Files area.
-
-    Parameters
-    ----------
-    fixture:
-        Relative path beneath ``tests/fixtures/data``.
-        Example:
-        ``"odd_column_names/odd_column_names_0001.json"``
-
-    source_system:
-        Source-system folder used by the production loader.
-
-    table_name:
-        Table folder used by the production loader.
-
-    file_name:
-        Optional destination filename. If omitted, the fixture's
-        original filename is used.
-
-    overwrite:
-        Whether to overwrite an existing destination file.
-
-    Returns
-    -------
-    str
-        The Lakehouse-relative destination path.
-
-    Examples
-    --------
-    >>> stage_fixture(
-    ...     "odd_column_names/odd_column_names_0001.json",
-    ...     source_system="test",
-    ...     table_name="odd_col_names",
-    ... )
-    'Files/test/odd_col_names/data/odd_column_names_0001.json'
-    """
+    """Stage a packaged data fixture into the loader's normal data path."""
     resource = files(_FIXTURE_PACKAGE).joinpath(fixture)
 
     if not resource.is_file():
@@ -66,6 +39,27 @@ def stage_fixture(
     fs.put(
         destination,
         resource.read_text(encoding="utf-8"),
+        overwrite=overwrite,
+    )
+
+    return destination
+
+
+def stage_schema_fixture(
+    fixture: str,
+    *,
+    source_system: str,
+    table_name: str,
+    overwrite: bool = True,
+) -> str:
+    """Stage a Spark StructType JSON fixture where BronzeLoader expects it."""
+    destination_dir = f"Files/_schemas/{source_system}"
+    destination = f"{destination_dir}/{table_name}"
+
+    fs.mkdirs(destination_dir)
+    fs.put(
+        destination,
+        _resource_text(fixture),
         overwrite=overwrite,
     )
 
