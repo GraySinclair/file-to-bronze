@@ -1,9 +1,12 @@
-
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections import Counter
 from collections.abc import Mapping
 
+import notebookutils
 from delta.tables import DeltaTable
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import (
@@ -26,11 +29,19 @@ class BronzeLoader:
 
     snapshot uses a batch read and requires an explicit path containing
     one complete current snapshot.
+
+    Source schemas are loaded from:
+
+        Files/_schemas/{source_system}/{table_name}
+
+    unless a StructType is explicitly passed to load().
     """
+
     IS_DELETED = "_is_deleted"
 
     _DELETE_FLAG = "_delete_flag"
     _ROW_NUMBER = "_row_number"
+
     _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     _INVALID_COLUMN_CHARS = re.compile(r"[^a-z0-9]+")
 
@@ -40,6 +51,7 @@ class BronzeLoader:
         *,
         bronze_lakehouse: str = "Bronze",
         files_root: str = "Files",
+        schema_root: str = "Files/_schemas",
         checkpoint_root: str = "Files/_checkpoints/file_to_bronze",
         file_format: str = "json",
         reader_options: Mapping[str, str] | None = None,
@@ -47,45 +59,79 @@ class BronzeLoader:
         allow_schema_evolution: bool = True,
     ) -> None:
         self.spark = spark
-        self.bronze_lakehouse = self._validate_identifier(bronze_lakehouse, "bronze_lakehouse")
+
+        self.bronze_lakehouse = self._validate_identifier(
+            bronze_lakehouse,
+            "bronze_lakehouse",
+        )
+
         self.files_root = files_root.rstrip("/")
+        self.schema_root = schema_root.rstrip("/")
         self.checkpoint_root = checkpoint_root.rstrip("/")
+
         self.file_format = file_format
         self.reader_options = dict(reader_options or {})
         self.enable_cdf = enable_cdf
         self.allow_schema_evolution = allow_schema_evolution
 
         if allow_schema_evolution:
-            spark.conf.set("spark.databricks.delta.schema.autoMerge.enabled", "true")
+            spark.conf.set(
+                "spark.databricks.delta.schema.autoMerge.enabled",
+                "true",
+            )
 
         if enable_cdf:
-            spark.conf.set("spark.databricks.delta.properties.defaults.enableChangeDataFeed", "true")
+            spark.conf.set(
+                "spark.databricks.delta.properties.defaults.enableChangeDataFeed",
+                "true",
+            )
 
-    def load(self, config: BronzeLoadConfig, *, source_path: str | None = None, schema: StructType | None = None) -> None:
-        """Process one configured table."""
+    def load(
+        self,
+        config: BronzeLoadConfig,
+        *,
+        source_path: str | None = None,
+        schema: StructType | None = None,
+    ) -> None:
+        """Process one configured table.
+
+        Schema resolution order:
+
+        1. Explicit schema passed to load().
+        2. Files/_schemas/{source_system}/{table_name}.
+        """
         self._validate_config(config)
 
         explicit_source_path = source_path is not None
         source_path = source_path or self._default_source_path(config)
 
+        if config.load_mode == "snapshot" and not explicit_source_path:
+            raise ValueError(
+                "Snapshot mode requires an explicit source_path "
+                "containing only the current complete snapshot."
+            )
+
+        schema = schema or self._load_schema(config)
+
         if config.load_mode == "snapshot":
-            if not explicit_source_path:
-                raise ValueError("Snapshot mode requires an explicit source_path containing only the current complete snapshot.")
-            self._load_snapshot(config, source_path)
+            self._load_snapshot(
+                config,
+                source_path,
+                schema,
+            )
         else:
-            self._load_incremental(config, source_path, schema)
+            self._load_incremental(
+                config,
+                source_path,
+                schema,
+            )
 
-        return
-
-    def _load_incremental(self, config: BronzeLoadConfig, source_path: str, schema: StructType | None) -> None:
-        schema = schema or (
-            self.spark.read
-            .format(self.file_format)
-            .options(**self.reader_options)
-            .load(source_path)
-            .schema
-        )
-
+    def _load_incremental(
+        self,
+        config: BronzeLoadConfig,
+        source_path: str,
+        schema: StructType,
+    ) -> None:
         source_df = (
             self.spark.readStream
             .format(self.file_format)
@@ -93,111 +139,204 @@ class BronzeLoader:
             .options(**self.reader_options)
             .load(source_path)
         )
+
         source_df = self._prepare_source(source_df)
 
         def process_batch(batch_df: DataFrame, _: int) -> None:
             if batch_df.isEmpty():
                 return
-            self._write_batch(config, batch_df, snapshot=False)
+
+            self._write_batch(
+                config,
+                batch_df,
+                snapshot=False,
+            )
 
         query = (
             source_df.writeStream
             .foreachBatch(process_batch)
-            .option("checkpointLocation", self._checkpoint_path(config))
+            .option(
+                "checkpointLocation",
+                self._checkpoint_path(config),
+            )
             .trigger(availableNow=True)
             .start()
         )
+
         query.awaitTermination()
 
-    def _load_snapshot(self, config: BronzeLoadConfig, source_path: str) -> None:
+    def _load_snapshot(
+        self,
+        config: BronzeLoadConfig,
+        source_path: str,
+        schema: StructType,
+    ) -> None:
         source_df = (
             self.spark.read
             .format(self.file_format)
+            .schema(schema)
             .options(**self.reader_options)
             .load(source_path)
         )
-        source_df = self._prepare_source(source_df)
-        self._write_batch(config, source_df, snapshot=True)
 
-    def _write_batch(self, config: BronzeLoadConfig, source_df: DataFrame, *, snapshot: bool) -> None:
+        source_df = self._prepare_source(source_df)
+
+        self._write_batch(
+            config,
+            source_df,
+            snapshot=True,
+        )
+
+    def _write_batch(
+        self,
+        config: BronzeLoadConfig,
+        source_df: DataFrame,
+        *,
+        snapshot: bool,
+    ) -> None:
         self._ensure_namespace(config)
 
         if config.load_mode == "append":
             self._append(config, source_df)
             return
 
-        self._merge(config, source_df, snapshot=snapshot)
+        self._merge(
+            config,
+            source_df,
+            snapshot=snapshot,
+        )
 
-    def _append(self, config: BronzeLoadConfig, source_df: DataFrame) -> None:
+    def _append(
+        self,
+        config: BronzeLoadConfig,
+        source_df: DataFrame,
+    ) -> None:
         target_table = self._target_table(config)
 
-        writer = source_df.write.format("delta").mode("append")
+        writer = (
+            source_df.write
+            .format("delta")
+            .mode("append")
+        )
+
         if self.allow_schema_evolution:
             writer = writer.option("mergeSchema", "true")
 
         writer.saveAsTable(target_table)
+
         self._set_cdf_property(target_table)
 
-    def _merge(self, config: BronzeLoadConfig, source_df: DataFrame, *, snapshot: bool) -> None:
+    def _merge(
+        self,
+        config: BronzeLoadConfig,
+        source_df: DataFrame,
+        *,
+        snapshot: bool,
+    ) -> None:
         target_table = self._target_table(config)
-        merge_keys = tuple(self._safe_column_name(x) for x in config.merge_keys)
+
+        merge_keys = tuple(
+            self._safe_column_name(name)
+            for name in config.merge_keys
+        )
+
         sequence_column = (
             self._safe_column_name(config.sequence_column)
-            if config.sequence_column else None
+            if config.sequence_column
+            else None
         )
 
         delete_column = (
             self._safe_column_name(config.delete_column)
-            if config.delete_column else None
+            if config.delete_column
+            else None
         )
 
-        soft_delete = config.soft_delete and (snapshot or delete_column is not None)
+        soft_delete = (
+            config.soft_delete
+            and (snapshot or delete_column is not None)
+        )
 
         self._require_columns(
             source_df,
             [
                 *merge_keys,
                 *([sequence_column] if sequence_column else []),
-                *([delete_column] if delete_column else [])
-            ]
+                *([delete_column] if delete_column else []),
+            ],
         )
 
-        source_df = self._deduplicate(source_df, merge_keys, sequence_column,)
+        source_df = self._deduplicate(
+            source_df,
+            merge_keys,
+            sequence_column,
+        )
+
         source_df = source_df.withColumn(
             self._DELETE_FLAG,
             (
-                coalesce(col(delete_column).cast("boolean"), lit(False))
-                if delete_column else lit(False)
-            )
+                coalesce(
+                    col(delete_column).cast("boolean"),
+                    lit(False),
+                )
+                if delete_column
+                else lit(False)
+            ),
         )
 
         if not self.spark.catalog.tableExists(target_table):
-            self._create_target(source_df, target_table, soft_delete=soft_delete)
+            self._create_target(
+                source_df,
+                target_table,
+                soft_delete=soft_delete,
+            )
 
         if soft_delete:
             self._ensure_soft_delete_columns(target_table)
 
         self._set_cdf_property(target_table)
 
-        merge_condition = " AND ".join(f"t.{key} = s.{key}" for key in merge_keys)
+        merge_condition = " AND ".join(
+            f"t.{key} = s.{key}"
+            for key in merge_keys
+        )
 
-        source_columns = [name for name in source_df.columns if name != self._DELETE_FLAG]
+        source_columns = [
+            name
+            for name in source_df.columns
+            if name != self._DELETE_FLAG
+        ]
 
-        active_values = {name: f"s.{name}" for name in source_columns}
+        active_values = {
+            name: f"s.{name}"
+            for name in source_columns
+        }
 
         if soft_delete:
-            active_values.update({self.IS_DELETED: "false"})
+            active_values[self.IS_DELETED] = "false"
 
         builder = (
-            DeltaTable.forName(self.spark, target_table).alias("t")
-            .merge(source_df.alias("s"), merge_condition)
+            DeltaTable
+            .forName(self.spark, target_table)
+            .alias("t")
+            .merge(
+                source_df.alias("s"),
+                merge_condition,
+            )
         )
 
         if delete_column:
             if soft_delete:
-                builder = builder.whenMatchedUpdate(condition=f"s.{self._DELETE_FLAG} = true", set={self.IS_DELETED: "true"})
+                builder = builder.whenMatchedUpdate(
+                    condition=f"s.{self._DELETE_FLAG} = true",
+                    set={
+                        self.IS_DELETED: "true",
+                    },
+                )
             else:
-                builder = builder.whenMatchedDelete(condition=f"s.{self._DELETE_FLAG} = true")
+                builder = builder.whenMatchedDelete(
+                    condition=f"s.{self._DELETE_FLAG} = true",
+                )
 
             builder = (
                 builder
@@ -210,38 +349,102 @@ class BronzeLoader:
                     values=active_values,
                 )
             )
+
         else:
             builder = (
                 builder
-                .whenMatchedUpdate(set=active_values)
-                .whenNotMatchedInsert(values=active_values)
+                .whenMatchedUpdate(
+                    set=active_values,
+                )
+                .whenNotMatchedInsert(
+                    values=active_values,
+                )
             )
 
         if snapshot:
             if soft_delete:
-                builder = builder.whenNotMatchedBySourceUpdate(set={self.IS_DELETED: "true"})
+                builder = builder.whenNotMatchedBySourceUpdate(
+                    set={
+                        self.IS_DELETED: "true",
+                    },
+                )
             else:
                 builder = builder.whenNotMatchedBySourceDelete()
 
         builder.execute()
 
-    def _create_target(self, source_df: DataFrame, target_table: str, *, soft_delete: bool) -> None:
+    def _create_target(
+        self,
+        source_df: DataFrame,
+        target_table: str,
+        *,
+        soft_delete: bool,
+    ) -> None:
         initial_df = (
             source_df
-            .filter(col(self._DELETE_FLAG) == lit(False))
+            .filter(
+                col(self._DELETE_FLAG) == lit(False)
+            )
             .drop(self._DELETE_FLAG)
         )
 
         if soft_delete:
-            initial_df = initial_df.withColumn(self.IS_DELETED, lit(False))
+            initial_df = initial_df.withColumn(
+                self.IS_DELETED,
+                lit(False),
+            )
 
-        initial_df.write.format("delta").mode("overwrite").saveAsTable(target_table)
+        (
+            initial_df.write
+            .format("delta")
+            .mode("overwrite")
+            .saveAsTable(target_table)
+        )
 
-    def _prepare_source(self, source_df: DataFrame) -> DataFrame:
-        normalized_names = [self._safe_column_name(name) for name in source_df.columns]
-        duplicates = {name for name in normalized_names if normalized_names.count(name) > 1}
-        if duplicates:
-            raise ValueError("Column normalization produced duplicates: " + ", ".join(sorted(duplicates)))
+    def _prepare_source(
+        self,
+        source_df: DataFrame,
+    ) -> DataFrame:
+        original_names = source_df.columns
+        normalized_names = [
+            self._safe_column_name(name)
+            for name in original_names
+        ]
+
+        normalized_counts = Counter(normalized_names)
+        duplicate_names = {
+            name
+            for name, count in normalized_counts.items()
+            if count > 1
+        }
+
+        if duplicate_names:
+            normalized_names = [
+                (
+                    f"{normalized}_{self._column_name_hash(original)}"
+                    if normalized in duplicate_names
+                    else normalized
+                )
+                for original, normalized in zip(
+                    original_names,
+                    normalized_names,
+                )
+            ]
+
+        final_counts = Counter(normalized_names)
+        unresolved_duplicates = sorted(
+            name
+            for name, count in final_counts.items()
+            if count > 1
+        )
+
+        if unresolved_duplicates:
+            raise ValueError(
+                "Column normalization still produced duplicates after "
+                "appending deterministic hashes. This can occur when the "
+                "source contains identical original column names: "
+                + ", ".join(unresolved_duplicates)
+            )
 
         source_df = source_df.toDF(*normalized_names)
 
@@ -250,86 +453,265 @@ class BronzeLoader:
             self._DELETE_FLAG,
             self._ROW_NUMBER,
         }
+
         conflicts = reserved.intersection(source_df.columns)
+
         if conflicts:
-            raise ValueError("Source data contains reserved columns: " + ", ".join(sorted(conflicts)))
+            raise ValueError(
+                "Source data contains reserved columns: "
+                + ", ".join(sorted(conflicts))
+            )
 
         return source_df
 
-    def _deduplicate(self, source_df: DataFrame, merge_keys: tuple[str, ...], sequence_column: str | None) -> DataFrame:
+    def _deduplicate(
+        self,
+        source_df: DataFrame,
+        merge_keys: tuple[str, ...],
+        sequence_column: str | None,
+    ) -> DataFrame:
         if sequence_column:
-            window = Window.partitionBy(*merge_keys).orderBy(col(sequence_column).desc_nulls_last())
+            window = (
+                Window
+                .partitionBy(*merge_keys)
+                .orderBy(
+                    col(sequence_column).desc_nulls_last()
+                )
+            )
 
             return (
                 source_df
-                .withColumn(self._ROW_NUMBER, row_number().over(window))
-                .filter(col(self._ROW_NUMBER) == 1).drop(self._ROW_NUMBER)
+                .withColumn(
+                    self._ROW_NUMBER,
+                    row_number().over(window),
+                )
+                .filter(
+                    col(self._ROW_NUMBER) == 1
+                )
+                .drop(self._ROW_NUMBER)
             )
 
-        has_duplicates = bool(source_df.groupBy(*merge_keys).count().filter(col("count") > 1).take(1))
+        has_duplicates = bool(
+            source_df
+            .groupBy(*merge_keys)
+            .count()
+            .filter(col("count") > 1)
+            .take(1)
+        )
 
-        # NOTE convert to 
         if has_duplicates:
-            raise ValueError("Duplicate merge keys were found. Set sequence_column so the newest source row can be selected deterministically.")
+            raise ValueError(
+                "Duplicate merge keys were found. "
+                "Set sequence_column so the newest source row "
+                "can be selected deterministically."
+            )
 
         return source_df
 
-    def _ensure_namespace(self, config: BronzeLoadConfig) -> None:
-        self.spark.sql(f"CREATE SCHEMA IF NOT EXISTS {self.bronze_lakehouse}.{config.source_system}")
+    @staticmethod
+    def _column_name_hash(name: str) -> str:
+        """Return a short deterministic hash for a raw source column name."""
+        return hashlib.sha256(
+            name.encode("utf-8")
+        ).hexdigest()[:8]
 
-    def _ensure_soft_delete_columns(self, target_table: str) -> None:
-        existing = set(self.spark.table(target_table).columns)
+    def _load_schema(
+        self,
+        config: BronzeLoadConfig,
+    ) -> StructType:
+        """Load the table's Spark StructType schema from Lakehouse Files."""
+        schema_path = self._schema_path(config)
+
+        if not notebookutils.fs.exists(schema_path):
+            raise FileNotFoundError(
+                "No Bronze schema was found for "
+                f"{config.source_system}.{config.table_name}. "
+                f"Expected schema at: {schema_path}"
+            )
+
+        try:
+            schema_json = json.loads(
+                notebookutils.fs.head(schema_path)
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON schema at: {schema_path}"
+            ) from exc
+
+        try:
+            return StructType.fromJson(schema_json)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValueError(
+                "Schema file does not contain a valid Spark "
+                f"StructType definition: {schema_path}"
+            ) from exc
+
+    def _ensure_namespace(
+        self,
+        config: BronzeLoadConfig,
+    ) -> None:
+        self.spark.sql(
+            "CREATE SCHEMA IF NOT EXISTS "
+            f"{self.bronze_lakehouse}.{config.source_system}"
+        )
+
+    def _ensure_soft_delete_columns(
+        self,
+        target_table: str,
+    ) -> None:
+        existing = set(
+            self.spark.table(target_table).columns
+        )
+
         missing = []
 
         if self.IS_DELETED not in existing:
-            missing.append(f"{self.IS_DELETED} BOOLEAN")
+            missing.append(
+                f"{self.IS_DELETED} BOOLEAN"
+            )
 
         if missing:
-            self.spark.sql(f"ALTER TABLE {target_table} ADD COLUMNS ({', '.join(missing)})")
+            self.spark.sql(
+                f"ALTER TABLE {target_table} "
+                f"ADD COLUMNS ({', '.join(missing)})"
+            )
 
-    def _set_cdf_property(self, target_table: str) -> None:
+    def _set_cdf_property(
+        self,
+        target_table: str,
+    ) -> None:
         if self.enable_cdf:
-            self.spark.sql(f"ALTER TABLE {target_table} SET TBLPROPERTIES (delta.enableChangeDataFeed = 'true')")
+            self.spark.sql(
+                f"ALTER TABLE {target_table} "
+                "SET TBLPROPERTIES "
+                "(delta.enableChangeDataFeed = 'true')"
+            )
 
-    def _validate_config(self, config: BronzeLoadConfig) -> None:
-        self._validate_identifier(config.source_system, "source_system")
-        self._validate_identifier(config.table_name, "table_name")
+    def _validate_config(
+        self,
+        config: BronzeLoadConfig,
+    ) -> None:
+        self._validate_identifier(
+            config.source_system,
+            "source_system",
+        )
 
-        if config.load_mode not in {"append", "upsert", "snapshot"}:
-            raise ValueError("load_mode must be append, upsert, or snapshot.")
+        self._validate_identifier(
+            config.table_name,
+            "table_name",
+        )
 
-        if config.load_mode in {"upsert", "snapshot"} and not config.merge_keys:
-            raise ValueError(f"{config.load_mode} mode requires merge_keys.")
+        if config.load_mode not in {
+            "append",
+            "upsert",
+            "snapshot",
+        }:
+            raise ValueError(
+                "load_mode must be append, upsert, or snapshot."
+            )
 
-        if config.load_mode == "append" and config.delete_column:
-            raise ValueError("delete_column is not supported for append mode.")
+        if (
+            config.load_mode in {"upsert", "snapshot"}
+            and not config.merge_keys
+        ):
+            raise ValueError(
+                f"{config.load_mode} mode requires merge_keys."
+            )
+
+        if (
+            config.load_mode == "append"
+            and config.delete_column
+        ):
+            raise ValueError(
+                "delete_column is not supported for append mode."
+            )
 
     @staticmethod
-    def _require_columns(source_df: DataFrame, required_columns: list[str]) -> None:
-        missing = sorted(set(required_columns).difference(source_df.columns))
+    def _require_columns(
+        source_df: DataFrame,
+        required_columns: list[str],
+    ) -> None:
+        missing = sorted(
+            set(required_columns)
+            .difference(source_df.columns)
+        )
 
         if missing:
-            raise ValueError("Source data is missing required columns: " + ", ".join(missing))
+            raise ValueError(
+                "Source data is missing required columns: "
+                + ", ".join(missing)
+            )
 
-    def _target_table(self, config: BronzeLoadConfig) -> str:
-        return f"{self.bronze_lakehouse}.{config.source_system}.{config.table_name}"
+    def _target_table(
+        self,
+        config: BronzeLoadConfig,
+    ) -> str:
+        return (
+            f"{self.bronze_lakehouse}."
+            f"{config.source_system}."
+            f"{config.table_name}"
+        )
 
-    def _default_source_path(self, config: BronzeLoadConfig) -> str:
-        return f"{self.files_root}/{config.source_system}/{config.table_name}/data"
+    def _default_source_path(
+        self,
+        config: BronzeLoadConfig,
+    ) -> str:
+        return (
+            f"{self.files_root}/"
+            f"{config.source_system}/"
+            f"{config.table_name}/data"
+        )
 
-    def _checkpoint_path(self, config: BronzeLoadConfig) -> str:
-        return f"{self.checkpoint_root}/{config.source_system}/{config.table_name}"
+    def _schema_path(
+        self,
+        config: BronzeLoadConfig,
+    ) -> str:
+        return (
+            f"{self.schema_root}/"
+            f"{config.source_system}/"
+            f"{config.table_name}"
+        )
 
-    def _safe_column_name(self, name: str) -> str:
-        name = self._INVALID_COLUMN_CHARS.sub("_", name.strip().lower()).strip("_")
+    def _checkpoint_path(
+        self,
+        config: BronzeLoadConfig,
+    ) -> str:
+        return (
+            f"{self.checkpoint_root}/"
+            f"{config.source_system}/"
+            f"{config.table_name}"
+        )
+
+    def _safe_column_name(
+        self,
+        name: str,
+    ) -> str:
+        name = (
+            self._INVALID_COLUMN_CHARS
+            .sub("_", name.strip().lower())
+            .strip("_")
+        )
 
         if not name:
-            raise ValueError("A column name became empty after normalization.")
+            raise ValueError(
+                "A column name became empty after normalization."
+            )
 
-        return f"column_{name}" if name[0].isdigit() else name
+        return (
+            f"column_{name}"
+            if name[0].isdigit()
+            else name
+        )
 
-    def _validate_identifier(self, value: str, name: str) -> str:
+    def _validate_identifier(
+        self,
+        value: str,
+        name: str,
+    ) -> str:
         if not self._VALID_IDENTIFIER.fullmatch(value):
-            raise ValueError(f"{name} must contain only letters, numbers, and underscores and cannot begin with a number.")
-        
+            raise ValueError(
+                f"{name} must contain only letters, numbers, "
+                "and underscores and cannot begin with a number."
+            )
+
         return value
