@@ -2,7 +2,7 @@
 
 from notebookutils import fs
 
-from tests.fixtures import stage_fixture
+from ..fixtures import stage_fixture
 
 
 def test_stage_odd_column_names_fixture():
