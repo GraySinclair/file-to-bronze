@@ -28,3 +28,9 @@ target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "src/file_to_bronze",
+    "tests",
+]
