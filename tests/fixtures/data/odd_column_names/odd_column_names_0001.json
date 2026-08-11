@@ -1,3 +1,5 @@
-{"Customer ID": 1001, "First Name": "Ada", "Last-Name": "Lovelace", "E-mail Address": "ada@example.com", "Total ($)": 125.5, "Created At": "2026-08-01T10:15:00Z", "Active?": true, "Address.City": "Chicago", "Column/With/Slashes": "alpha", "Mixed CASE Column": "A"}
-{"Customer ID": 1002, "First Name": "Grace", "Last-Name": "Hopper", "E-mail Address": "grace@example.com", "Total ($)": 250.0, "Created At": "2026-08-02T11:30:00Z", "Active?": true, "Address.City": "Arlington", "Column/With/Slashes": "beta", "Mixed CASE Column": "B"}
-{"Customer ID": 1003, "First Name": "Alan", "Last-Name": "Turing", "E-mail Address": "alan@example.com", "Total ($)": null, "Created At": "2026-08-03T09:00:00Z", "Active?": false, "Address.City": "London", "Column/With/Slashes": "gamma", "Mixed CASE Column": "C"}
+{"Customer (ID)": 101, "Customer Name": "Customer A", "Region/Area": "North", "Account Balance ($)": 1250.5, "Updated At (UTC)": "2026-08-11 09:15:00"}
+{"Customer (ID)": 102, "Customer Name": "Customer B", "Region/Area": "South", "Account Balance ($)": 875.25, "Updated At (UTC)": "2026-08-11 09:30:00"}
+{"Customer (ID)": 103, "Customer Name": "Customer C", "Region/Area": "East", "Account Balance ($)": 3100.0, "Updated At (UTC)": "2026-08-11 09:45:00"}
+{"Customer (ID)": 104, "Customer Name": "Customer D", "Region/Area": "West", "Account Balance ($)": 420.75, "Updated At (UTC)": "2026-08-11 10:00:00"}
+{"Customer (ID)": 105, "Customer Name": "Customer E", "Region/Area": "North", "Account Balance ($)": 9999.99, "Updated At (UTC)": "2026-08-11 10:15:00"}
