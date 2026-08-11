@@ -4,9 +4,11 @@ dynamic = ["version"]
 description = "Micro-package to facilitate files-to-bronze table loading in a structured manner."
 readme = "README.md"
 requires-python = ">=3.11"
+
 authors = [
     { name = "Gray Sinclair" }
 ]
+
 dependencies = []
 
 [build-system]
@@ -28,6 +30,10 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = '-m "not extended"'
+markers = [
+    "extended: validation tests excluded from normal test runs",
+]
 
 [tool.hatch.build.targets.wheel]
 only-include = [
