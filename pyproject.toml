@@ -30,7 +30,11 @@ target-version = "py311"
 testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
-packages = [
+only-include = [
     "src/file_to_bronze",
     "tests",
 ]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = ""
+"tests" = "file_to_bronze_tests"
