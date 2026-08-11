@@ -5,7 +5,8 @@ from pyspark.sql import SparkSession
 from pyspark.sql.types import DoubleType, LongType, StringType, TimestampType
 
 from file_to_bronze import BronzeLoadConfig, BronzeLoader
-from tests.fixtures import stage_fixture, stage_schema_fixture
+
+from ..fixtures import stage_fixture, stage_schema_fixture
 
 
 SOURCE_SYSTEM = "test"
