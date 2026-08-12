@@ -86,7 +86,7 @@ def save_schema(
 
     schema_path = (
         f"{schema_directory}/"
-        f"{table_name}.json"
+        f"{table_name}"
     )
 
     notebookutils.fs.mkdirs(schema_directory)
