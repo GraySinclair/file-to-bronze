@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-from collections import Counter
 from collections.abc import Mapping
 
 import notebookutils
@@ -19,6 +17,7 @@ from pyspark.sql.types import StructType
 from pyspark.sql.window import Window
 
 from .bronze_load_config import BronzeLoadConfig
+from .column_normalization import normalize_columns
 
 
 class BronzeLoader:
@@ -43,7 +42,6 @@ class BronzeLoader:
     _ROW_NUMBER = "_row_number"
 
     _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-    _INVALID_COLUMN_CHARS = re.compile(r"[^a-z0-9]+")
 
     def __init__(
         self,
@@ -99,6 +97,9 @@ class BronzeLoader:
 
         1. Explicit schema passed to load().
         2. Files/_schemas/{source_system}/{table_name}.
+
+        Column names referenced by BronzeLoadConfig must use the final
+        normalized Bronze column names.
         """
         self._validate_config(config)
 
@@ -235,22 +236,9 @@ class BronzeLoader:
     ) -> None:
         target_table = self._target_table(config)
 
-        merge_keys = tuple(
-            self._safe_column_name(name)
-            for name in config.merge_keys
-        )
-
-        sequence_column = (
-            self._safe_column_name(config.sequence_column)
-            if config.sequence_column
-            else None
-        )
-
-        delete_column = (
-            self._safe_column_name(config.delete_column)
-            if config.delete_column
-            else None
-        )
+        merge_keys = config.merge_keys
+        sequence_column = config.sequence_column
+        delete_column = config.delete_column
 
         soft_delete = (
             config.soft_delete
@@ -405,64 +393,7 @@ class BronzeLoader:
         self,
         source_df: DataFrame,
     ) -> DataFrame:
-        original_names = source_df.columns
-        normalized_names = [
-            self._safe_column_name(name)
-            for name in original_names
-        ]
-
-        normalized_counts = Counter(normalized_names)
-        duplicate_names = {
-            name
-            for name, count in normalized_counts.items()
-            if count > 1
-        }
-
-        if duplicate_names:
-            normalized_names = [
-                (
-                    f"{normalized}_{self._column_name_hash(original)}"
-                    if normalized in duplicate_names
-                    else normalized
-                )
-                for original, normalized in zip(
-                    original_names,
-                    normalized_names,
-                )
-            ]
-
-        final_counts = Counter(normalized_names)
-        unresolved_duplicates = sorted(
-            name
-            for name, count in final_counts.items()
-            if count > 1
-        )
-
-        if unresolved_duplicates:
-            raise ValueError(
-                "Column normalization still produced duplicates after "
-                "appending deterministic hashes. This can occur when the "
-                "source contains identical original column names: "
-                + ", ".join(unresolved_duplicates)
-            )
-
-        source_df = source_df.toDF(*normalized_names)
-
-        reserved = {
-            self.IS_DELETED,
-            self._DELETE_FLAG,
-            self._ROW_NUMBER,
-        }
-
-        conflicts = reserved.intersection(source_df.columns)
-
-        if conflicts:
-            raise ValueError(
-                "Source data contains reserved columns: "
-                + ", ".join(sorted(conflicts))
-            )
-
-        return source_df
+        return normalize_columns(source_df)
 
     def _deduplicate(
         self,
@@ -507,13 +438,6 @@ class BronzeLoader:
             )
 
         return source_df
-
-    @staticmethod
-    def _column_name_hash(name: str) -> str:
-        """Return a short deterministic hash for a raw source column name."""
-        return hashlib.sha256(
-            name.encode("utf-8")
-        ).hexdigest()[:8]
 
     def _load_schema(
         self,
@@ -680,27 +604,6 @@ class BronzeLoader:
             f"{self.checkpoint_root}/"
             f"{config.source_system}/"
             f"{config.table_name}"
-        )
-
-    def _safe_column_name(
-        self,
-        name: str,
-    ) -> str:
-        name = (
-            self._INVALID_COLUMN_CHARS
-            .sub("_", name.strip().lower())
-            .strip("_")
-        )
-
-        if not name:
-            raise ValueError(
-                "A column name became empty after normalization."
-            )
-
-        return (
-            f"column_{name}"
-            if name[0].isdigit()
-            else name
         )
 
     def _validate_identifier(
