@@ -97,9 +97,6 @@ class BronzeLoader:
 
         1. Explicit schema passed to load().
         2. Files/_schemas/{source_system}/{table_name}.
-
-        Column names referenced by BronzeLoadConfig must use the final
-        normalized Bronze column names.
         """
         self._validate_config(config)
 
@@ -236,9 +233,22 @@ class BronzeLoader:
     ) -> None:
         target_table = self._target_table(config)
 
-        merge_keys = config.merge_keys
-        sequence_column = config.sequence_column
-        delete_column = config.delete_column
+        merge_keys = tuple(
+            self._safe_column_name(name)
+            for name in config.merge_keys
+        )
+
+        sequence_column = (
+            self._safe_column_name(config.sequence_column)
+            if config.sequence_column
+            else None
+        )
+
+        delete_column = (
+            self._safe_column_name(config.delete_column)
+            if config.delete_column
+            else None
+        )
 
         soft_delete = (
             config.soft_delete
@@ -593,7 +603,7 @@ class BronzeLoader:
         return (
             f"{self.schema_root}/"
             f"{config.source_system}/"
-            f"{config.table_name}.json"
+            f"{config.table_name}"
         )
 
     def _checkpoint_path(
@@ -604,6 +614,26 @@ class BronzeLoader:
             f"{self.checkpoint_root}/"
             f"{config.source_system}/"
             f"{config.table_name}"
+        )
+
+    @staticmethod
+    def _safe_column_name(
+        name: str,
+    ) -> str:
+        name = (
+            re.sub(r"[^a-z0-9]+", "_", name.strip().lower())
+            .strip("_")
+        )
+
+        if not name:
+            raise ValueError(
+                "A column name became empty after normalization."
+            )
+
+        return (
+            f"column_{name}"
+            if name[0].isdigit()
+            else name
         )
 
     def _validate_identifier(
