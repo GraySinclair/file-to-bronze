@@ -593,7 +593,7 @@ class BronzeLoader:
         return (
             f"{self.schema_root}/"
             f"{config.source_system}/"
-            f"{config.table_name}"
+            f"{config.table_name}.json"
         )
 
     def _checkpoint_path(
