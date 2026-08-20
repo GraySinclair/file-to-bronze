@@ -26,8 +26,9 @@ class BronzeLoader:
     append and upsert use an available-now stream so the checkpoint
     records which files have already been processed.
 
-    snapshot uses a batch read and requires an explicit path containing
-    one complete current snapshot.
+    snapshot uses a batch read of all files currently in the source data
+    path. It does not use a checkpoint, so every load represents the full
+    current snapshot.
 
     Source schemas are loaded from:
 
@@ -103,15 +104,7 @@ class BronzeLoader:
         """
         self._validate_config(config)
 
-        explicit_source_path = source_path is not None
         source_path = source_path or self._default_source_path(config)
-
-        if config.load_mode == "snapshot" and not explicit_source_path:
-            raise ValueError(
-                "Snapshot mode requires an explicit source_path "
-                "containing only the current complete snapshot."
-            )
-
         schema = schema or self._load_schema(config)
 
         if config.load_mode == "snapshot":
