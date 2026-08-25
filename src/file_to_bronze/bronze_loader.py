@@ -126,6 +126,34 @@ class BronzeLoader:
         source_path: str,
         schema: StructType,
     ) -> None:
+        # Create a missing target before entering foreachBatch.
+        # Fabric can lose the active catalog session when saveAsTable()
+        # creates a managed table from inside the Python callback.
+        self._ensure_namespace(config)
+
+        target_table = self._target_table(config)
+
+        if not self.spark.catalog.tableExists(target_table):
+            bootstrap_df = self.spark.createDataFrame([], schema)
+            bootstrap_df = self._prepare_source(bootstrap_df)
+            bootstrap_df = bootstrap_df.withColumn(
+                self._DELETE_FLAG,
+                lit(False),
+            )
+
+            soft_delete = (
+                config.soft_delete
+                and config.delete_column is not None
+            )
+
+            self._create_target(
+                bootstrap_df,
+                target_table,
+                soft_delete=soft_delete,
+            )
+
+            self._set_cdf_property(target_table)
+
         source_df = (
             self.spark.readStream
             .format(self.file_format)
