@@ -18,24 +18,26 @@ from .column_normalization import normalize_columns
 class BronzeLoader:
     """Load landed files into Bronze Delta tables.
 
-    append and upsert use an available-now stream so the checkpoint
-    records which files have already been processed.
+    append and upsert use an available-now stream so the checkpoint records
+    which files have already been processed.
 
-    snapshot uses a batch read of all files currently in the source data
-    path. It does not use a checkpoint, so every load represents the full
-    current snapshot.
+    snapshot uses a batch read of all files currently in the source data path.
+    It does not use a checkpoint, so every load represents the full current
+    snapshot.
 
-    Source schemas are loaded from:
+    Schema definitions are loaded from:
 
         Files/{source_system}/_misc/schemas/{table_name}.json
 
-    unless a StructType is explicitly passed to load().
+    Each schema file contains both the physical source schema used to parse
+    landed files and the desired normalized Bronze schema used after parsing.
     """
 
     IS_DELETED = "_is_deleted"
 
     _DELETE_FLAG = "_delete_flag"
     _ROW_NUMBER = "_row_number"
+    _SCHEMA_VERSION = 2
 
     _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -51,11 +53,8 @@ class BronzeLoader:
         allow_schema_evolution: bool = True,
     ) -> None:
         self.spark = spark
-
         self.bronze_lakehouse = self._validate_identifier(bronze_lakehouse, "bronze_lakehouse")
-
         self.files_root = files_root.rstrip("/")
-
         self.file_format = file_format
         self.reader_options = dict(reader_options or {})
         self.enable_cdf = enable_cdf
@@ -81,8 +80,12 @@ class BronzeLoader:
 
         Schema resolution order:
 
-        1. Explicit schema passed to load().
+        1. Explicit source schema passed to load().
         2. Files/{source_system}/_misc/schemas/{table_name}.json.
+
+        When an explicit schema is supplied, its data types are used for both
+        source parsing and Bronze output. The saved schema format should be
+        used when source and Bronze data types differ.
 
         Column names referenced by BronzeLoadConfig must use the final
         normalized Bronze column names.
@@ -90,18 +93,24 @@ class BronzeLoader:
         self._validate_config(config)
 
         source_path = source_path or self._default_source_path(config)
-        schema = schema or self._load_schema(config)
+
+        if schema is None:
+            source_schema, bronze_schema = self._load_schemas(config)
+        else:
+            source_schema = schema
+            bronze_schema = normalize_columns(self.spark.createDataFrame([], schema)).schema
 
         if config.load_mode == "snapshot":
-            self._load_snapshot(config, source_path, schema)
+            self._load_snapshot(config, source_path, source_schema, bronze_schema)
         else:
-            self._load_incremental(config, source_path, schema)
+            self._load_incremental(config, source_path, source_schema, bronze_schema)
 
     def _load_incremental(
         self,
         config: BronzeLoadConfig,
         source_path: str,
-        schema: StructType,
+        source_schema: StructType,
+        bronze_schema: StructType,
     ) -> None:
         # Create a missing target before entering foreachBatch.
         # Fabric can lose the active catalog session when saveAsTable()
@@ -111,25 +120,22 @@ class BronzeLoader:
         target_table = self._target_table(config)
 
         if not self.spark.catalog.tableExists(target_table):
-            bootstrap_df = self.spark.createDataFrame([], schema)
-            bootstrap_df = self._prepare_source(bootstrap_df)
+            bootstrap_df = self.spark.createDataFrame([], bronze_schema)
             bootstrap_df = bootstrap_df.withColumn(self._DELETE_FLAG, lit(False))
-
             soft_delete = config.soft_delete and config.delete_column is not None
 
             self._create_target(bootstrap_df, target_table, soft_delete=soft_delete)
-
             self._set_cdf_property(target_table)
 
         source_df = (
             self.spark.readStream
             .format(self.file_format)
-            .schema(schema)
+            .schema(source_schema)
             .options(**self.reader_options)
             .load(source_path)
         )
 
-        source_df = self._prepare_source(source_df)
+        source_df = self._prepare_source(source_df, bronze_schema)
 
         def process_batch(batch_df: DataFrame, _: int) -> None:
             if batch_df.isEmpty():
@@ -151,18 +157,18 @@ class BronzeLoader:
         self,
         config: BronzeLoadConfig,
         source_path: str,
-        schema: StructType,
+        source_schema: StructType,
+        bronze_schema: StructType,
     ) -> None:
         source_df = (
             self.spark.read
             .format(self.file_format)
-            .schema(schema)
+            .schema(source_schema)
             .options(**self.reader_options)
             .load(source_path)
         )
 
-        source_df = self._prepare_source(source_df)
-
+        source_df = self._prepare_source(source_df, bronze_schema)
         self._write_batch(config, source_df, snapshot=True)
 
     def _write_batch(
@@ -182,23 +188,19 @@ class BronzeLoader:
 
     def _append(self, config: BronzeLoadConfig, source_df: DataFrame) -> None:
         target_table = self._target_table(config)
-
         writer = source_df.write.format("delta").mode("append")
 
         if self.allow_schema_evolution:
             writer = writer.option("mergeSchema", "true")
 
         writer.saveAsTable(target_table)
-
         self._set_cdf_property(target_table)
 
     def _merge(self, config: BronzeLoadConfig, source_df: DataFrame, *, snapshot: bool) -> None:
         target_table = self._target_table(config)
-
         merge_keys = config.merge_keys
         sequence_column = config.sequence_column
         delete_column = config.delete_column
-
         soft_delete = config.soft_delete and (snapshot or delete_column is not None)
 
         self._require_columns(
@@ -209,9 +211,9 @@ class BronzeLoader:
                 *([delete_column] if delete_column else []),
             ],
         )
+        self._require_non_null_merge_keys(source_df, merge_keys)
 
         source_df = self._deduplicate(source_df, merge_keys, sequence_column)
-
         source_df = source_df.withColumn(
             self._DELETE_FLAG,
             (
@@ -230,9 +232,7 @@ class BronzeLoader:
         self._set_cdf_property(target_table)
 
         merge_condition = " AND ".join(f"t.{key} = s.{key}" for key in merge_keys)
-
         source_columns = [name for name in source_df.columns if name != self._DELETE_FLAG]
-
         active_values = {name: f"s.{name}" for name in source_columns}
 
         if soft_delete:
@@ -262,7 +262,6 @@ class BronzeLoader:
                     values=active_values,
                 )
             )
-
         else:
             builder = (
                 builder
@@ -278,7 +277,13 @@ class BronzeLoader:
 
         builder.execute()
 
-    def _create_target(self, source_df: DataFrame, target_table: str, *, soft_delete: bool) -> None:
+    def _create_target(
+        self,
+        source_df: DataFrame,
+        target_table: str,
+        *,
+        soft_delete: bool,
+    ) -> None:
         initial_df = source_df.filter(col(self._DELETE_FLAG) == lit(False)).drop(self._DELETE_FLAG)
 
         if soft_delete:
@@ -286,8 +291,40 @@ class BronzeLoader:
 
         initial_df.write.format("delta").mode("overwrite").saveAsTable(target_table)
 
-    def _prepare_source(self, source_df: DataFrame) -> DataFrame:
-        return normalize_columns(source_df)
+    def _prepare_source(self, source_df: DataFrame, bronze_schema: StructType) -> DataFrame:
+        source_df = normalize_columns(source_df)
+        expected_columns = [field.name for field in bronze_schema.fields]
+        actual_columns = source_df.columns
+
+        missing = sorted(set(expected_columns) - set(actual_columns))
+        extra = sorted(set(actual_columns) - set(expected_columns))
+
+        if missing or extra:
+            details = []
+
+            if missing:
+                details.append("missing Bronze columns: " + ", ".join(missing))
+
+            if extra:
+                details.append("unexpected source columns: " + ", ".join(extra))
+
+            raise ValueError(
+                "Source columns do not match the saved Bronze schema; " + "; ".join(details)
+            )
+
+        source_fields = {field.name: field for field in source_df.schema.fields}
+        expressions = []
+
+        for bronze_field in bronze_schema.fields:
+            source_field = source_fields[bronze_field.name]
+            expression = col(bronze_field.name)
+
+            if source_field.dataType != bronze_field.dataType:
+                expression = expression.cast(bronze_field.dataType)
+
+            expressions.append(expression.alias(bronze_field.name))
+
+        return source_df.select(*expressions)
 
     def _deduplicate(
         self,
@@ -322,8 +359,8 @@ class BronzeLoader:
 
         return source_df
 
-    def _load_schema(self, config: BronzeLoadConfig) -> StructType:
-        """Load the table's Spark StructType schema from Lakehouse Files."""
+    def _load_schemas(self, config: BronzeLoadConfig) -> tuple[StructType, StructType]:
+        """Load the physical source schema and desired Bronze schema."""
         schema_path = self._schema_path(config)
 
         if not notebookutils.fs.exists(schema_path):
@@ -334,17 +371,32 @@ class BronzeLoader:
             )
 
         try:
-            schema_json = json.loads(notebookutils.fs.head(schema_path))
+            schema_json = json.loads(notebookutils.fs.head(schema_path, 10_000_000))
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid JSON schema at: {schema_path}") from exc
 
+        if schema_json.get("type") == "struct":
+            raise ValueError(
+                f"Legacy schema format detected at: {schema_path}. "
+                "Regenerate it with the current save_schema() before loading."
+            )
+
+        if schema_json.get("version") != self._SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported schema version at: {schema_path}. "
+                f"Expected version {self._SCHEMA_VERSION}."
+            )
+
         try:
-            return StructType.fromJson(schema_json)
+            source_schema = StructType.fromJson(schema_json["source_schema"])
+            bronze_schema = StructType.fromJson(schema_json["bronze_schema"])
         except (TypeError, ValueError, KeyError) as exc:
             raise ValueError(
-                "Schema file does not contain a valid Spark "
-                f"StructType definition: {schema_path}"
+                "Schema file does not contain valid source_schema and "
+                f"bronze_schema definitions: {schema_path}"
             ) from exc
+
+        return source_schema, bronze_schema
 
     def _ensure_namespace(self, config: BronzeLoadConfig) -> None:
         self.spark.sql(
@@ -354,14 +406,13 @@ class BronzeLoader:
 
     def _ensure_soft_delete_columns(self, target_table: str) -> None:
         existing = set(self.spark.table(target_table).columns)
-
         missing = []
 
         if self.IS_DELETED not in existing:
             missing.append(f"{self.IS_DELETED} BOOLEAN")
 
         if missing:
-            self.spark.sql(f"ALTER TABLE {target_table} " f"ADD COLUMNS ({', '.join(missing)})")
+            self.spark.sql(f"ALTER TABLE {target_table} ADD COLUMNS ({', '.join(missing)})")
 
     def _set_cdf_property(self, target_table: str) -> None:
         if self.enable_cdf:
@@ -373,7 +424,6 @@ class BronzeLoader:
 
     def _validate_config(self, config: BronzeLoadConfig) -> None:
         self._validate_identifier(config.source_system, "source_system")
-
         self._validate_identifier(config.table_name, "table_name")
 
         if config.load_mode not in {"append", "upsert", "snapshot"}:
@@ -391,6 +441,16 @@ class BronzeLoader:
 
         if missing:
             raise ValueError("Source data is missing required columns: " + ", ".join(missing))
+
+    @staticmethod
+    def _require_non_null_merge_keys(source_df: DataFrame, merge_keys: tuple[str, ...]) -> None:
+        null_keys = [key for key in merge_keys if source_df.filter(col(key).isNull()).take(1)]
+
+        if null_keys:
+            raise ValueError(
+                "Merge key columns contain null values after source parsing/casting: "
+                + ", ".join(null_keys)
+            )
 
     def _target_table(self, config: BronzeLoadConfig) -> str:
         return f"{self.bronze_lakehouse}.{config.source_system}.{config.table_name}"
