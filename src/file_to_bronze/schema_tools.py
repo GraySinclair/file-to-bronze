@@ -77,7 +77,7 @@ def save_schema(
 
     Schema is written to:
 
-        Files/{source_system}/{table_name}/schema/{table_name}.json
+        Files/{source_system}/_misc/schemas/{table_name}.json
     """
     _validate_identifier(source_system, "source_system")
     _validate_identifier(table_name, "table_name")
@@ -93,11 +93,7 @@ def save_schema(
     )
 
     normalized_raw_df = normalize_columns(raw_df)
-
-    desired_fields = {
-        field.name: field
-        for field in df.schema.fields
-    }
+    desired_fields = {field.name: field for field in df.schema.fields}
 
     expected_columns = set(normalized_raw_df.columns)
     actual_columns = set(df.columns)
@@ -109,29 +105,19 @@ def save_schema(
         details = []
 
         if missing:
-            details.append(
-                "missing normalized source columns: "
-                + ", ".join(missing)
-            )
+            details.append("missing normalized source columns: " + ", ".join(missing))
 
         if extra:
-            details.append(
-                "unexpected columns: "
-                + ", ".join(extra)
-            )
+            details.append("unexpected columns: " + ", ".join(extra))
 
         raise ValueError(
-            "The DataFrame columns no longer match the normalized "
-            "source schema; "
+            "The DataFrame columns no longer match the normalized source schema; "
             + "; ".join(details)
         )
 
     raw_fields = []
 
-    for raw_field, normalized_field in zip(
-        raw_df.schema.fields,
-        normalized_raw_df.schema.fields,
-    ):
+    for raw_field, normalized_field in zip(raw_df.schema.fields, normalized_raw_df.schema.fields):
         desired_field = desired_fields[normalized_field.name]
 
         raw_fields.append(
@@ -146,26 +132,13 @@ def save_schema(
     schema = StructType(raw_fields)
 
     files_root = files_root.rstrip("/")
-
-    schema_directory = (
-        f"{files_root}/"
-        f"{source_system}/"
-        f"{table_name}/schema"
-    )
-
-    schema_path = (
-        f"{schema_directory}/"
-        f"{table_name}.json"
-    )
+    schema_directory = f"{files_root}/{source_system}/_misc/schemas"
+    schema_path = f"{schema_directory}/{table_name}.json"
 
     notebookutils.fs.mkdirs(schema_directory)
-
     notebookutils.fs.put(
         schema_path,
-        json.dumps(
-            schema.jsonValue(),
-            indent=2,
-        ),
+        json.dumps(schema.jsonValue(), indent=2),
         overwrite=overwrite,
     )
 
@@ -183,12 +156,7 @@ def _read_inferred_dataframe(
     reader_options: Mapping[str, str] | None,
 ) -> DataFrame:
     files_root = files_root.rstrip("/")
-
-    source_path = source_path or (
-        f"{files_root}/"
-        f"{source_system}/"
-        f"{table_name}/data"
-    )
+    source_path = source_path or f"{files_root}/{source_system}/{table_name}/data"
 
     return (
         spark.read
@@ -198,10 +166,7 @@ def _read_inferred_dataframe(
     )
 
 
-def _validate_identifier(
-    value: str,
-    name: str,
-) -> str:
+def _validate_identifier(value: str, name: str) -> str:
     if not _VALID_IDENTIFIER.fullmatch(value):
         raise ValueError(
             f"{name} must contain only letters, numbers, "
