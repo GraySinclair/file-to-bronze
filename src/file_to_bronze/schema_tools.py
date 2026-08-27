@@ -59,7 +59,6 @@ def save_schema(
     table_name: str,
     source_path: str | None = None,
     files_root: str = "Files",
-    schema_root: str = "Files/_schemas",
     file_format: str = "json",
     reader_options: Mapping[str, str] | None = None,
     overwrite: bool = True,
@@ -78,7 +77,7 @@ def save_schema(
 
     Schema is written to:
 
-        Files/_schemas/{source_system}/{table_name}.json
+        Files/{source_system}/{table_name}/schema/{table_name}.json
     """
     _validate_identifier(source_system, "source_system")
     _validate_identifier(table_name, "table_name")
@@ -146,9 +145,18 @@ def save_schema(
 
     schema = StructType(raw_fields)
 
-    schema_root = schema_root.rstrip("/")
-    schema_directory = f"{schema_root}/{source_system}"
-    schema_path = f"{schema_directory}/{table_name}.json"
+    files_root = files_root.rstrip("/")
+
+    schema_directory = (
+        f"{files_root}/"
+        f"{source_system}/"
+        f"{table_name}/schema"
+    )
+
+    schema_path = (
+        f"{schema_directory}/"
+        f"{table_name}.json"
+    )
 
     notebookutils.fs.mkdirs(schema_directory)
 
