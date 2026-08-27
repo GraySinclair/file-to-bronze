@@ -32,7 +32,7 @@ class BronzeLoader:
 
     Source schemas are loaded from:
 
-        Files/_schemas/{source_system}/{table_name}.json
+        Files/{source_system}/{table_name}/schema/{table_name}.json
 
     unless a StructType is explicitly passed to load().
     """
@@ -50,8 +50,6 @@ class BronzeLoader:
         *,
         bronze_lakehouse: str = "Bronze",
         files_root: str = "Files",
-        schema_root: str = "Files/_schemas",
-        checkpoint_root: str = "Files/_checkpoints/file_to_bronze",
         file_format: str = "json",
         reader_options: Mapping[str, str] | None = None,
         enable_cdf: bool = True,
@@ -65,8 +63,6 @@ class BronzeLoader:
         )
 
         self.files_root = files_root.rstrip("/")
-        self.schema_root = schema_root.rstrip("/")
-        self.checkpoint_root = checkpoint_root.rstrip("/")
 
         self.file_format = file_format
         self.reader_options = dict(reader_options or {})
@@ -97,7 +93,7 @@ class BronzeLoader:
         Schema resolution order:
 
         1. Explicit schema passed to load().
-        2. Files/_schemas/{source_system}/{table_name}.json.
+        2. Files/{source_system}/{table_name}/schema/{table_name}.json.
 
         Column names referenced by BronzeLoadConfig must use the final
         normalized Bronze column names.
@@ -612,8 +608,9 @@ class BronzeLoader:
         config: BronzeLoadConfig,
     ) -> str:
         return (
-            f"{self.schema_root}/"
+            f"{self.files_root}/"
             f"{config.source_system}/"
+            f"{config.table_name}/schema/"
             f"{config.table_name}.json"
         )
 
@@ -622,9 +619,9 @@ class BronzeLoader:
         config: BronzeLoadConfig,
     ) -> str:
         return (
-            f"{self.checkpoint_root}/"
+            f"{self.files_root}/"
             f"{config.source_system}/"
-            f"{config.table_name}"
+            f"{config.table_name}/checkpoint"
         )
 
     def _validate_identifier(
