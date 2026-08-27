@@ -6,11 +6,11 @@ from collections.abc import Mapping
 
 import notebookutils
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.types import StructField, StructType
 
 from .column_normalization import normalize_columns
 
 
+_SCHEMA_VERSION = 2
 _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -28,9 +28,9 @@ def load_inferred_dataframe(
 
     This function is intended for initial schema development.
 
-    Spark first reads the raw source using schema inference. The returned
-    DataFrame then has its top-level column names normalized using the
-    shared column normalization logic.
+    Spark reads the raw source using schema inference. The returned DataFrame
+    then has its top-level column names normalized using the shared column
+    normalization logic.
 
     Default source path:
 
@@ -63,17 +63,15 @@ def save_schema(
     reader_options: Mapping[str, str] | None = None,
     overwrite: bool = True,
 ) -> str:
-    """Save a raw-source read schema using the DataFrame's desired types.
+    """Save the physical source schema and desired Bronze schema.
 
-    The supplied DataFrame is expected to have normalized column names.
-    Its current data types are treated as the desired Bronze data types.
+    The supplied DataFrame must use normalized column names. Its current data
+    types are stored as the desired Bronze data types.
 
-    The raw source is read again with schema inference so the original
-    source column names can be recovered. Those raw names are paired with
-    the desired data types from ``df`` and serialized as a Spark StructType.
-
-    This is necessary because BronzeLoader applies the explicit schema
-    while reading the raw files, before column normalization occurs.
+    The raw source is read again with schema inference so its physical JSON
+    types and original source column names are also captured. BronzeLoader
+    uses that source schema to parse files, then normalizes and casts to the
+    desired Bronze schema afterward.
 
     Schema is written to:
 
@@ -93,8 +91,6 @@ def save_schema(
     )
 
     normalized_raw_df = normalize_columns(raw_df)
-    desired_fields = {field.name: field for field in df.schema.fields}
-
     expected_columns = set(normalized_raw_df.columns)
     actual_columns = set(df.columns)
 
@@ -115,21 +111,11 @@ def save_schema(
             + "; ".join(details)
         )
 
-    raw_fields = []
-
-    for raw_field, normalized_field in zip(raw_df.schema.fields, normalized_raw_df.schema.fields):
-        desired_field = desired_fields[normalized_field.name]
-
-        raw_fields.append(
-            StructField(
-                name=raw_field.name,
-                dataType=desired_field.dataType,
-                nullable=desired_field.nullable,
-                metadata=desired_field.metadata,
-            )
-        )
-
-    schema = StructType(raw_fields)
+    schema_payload = {
+        "version": _SCHEMA_VERSION,
+        "source_schema": raw_df.schema.jsonValue(),
+        "bronze_schema": df.schema.jsonValue(),
+    }
 
     files_root = files_root.rstrip("/")
     schema_directory = f"{files_root}/{source_system}/_misc/schemas"
@@ -138,7 +124,7 @@ def save_schema(
     notebookutils.fs.mkdirs(schema_directory)
     notebookutils.fs.put(
         schema_path,
-        json.dumps(schema.jsonValue(), indent=2),
+        json.dumps(schema_payload, indent=2),
         overwrite=overwrite,
     )
 
